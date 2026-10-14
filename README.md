@@ -1,154 +1,275 @@
-# Asynchronous FIFO Design and Verification
+# Asynchronous FIFO Design & Verification using SystemVerilog
 
 ## Overview
 
-This project implements a parameterized, synthesizable **Asynchronous FIFO (First-In, First-Out) buffer** using Verilog/SystemVerilog. It enables reliable data transfer between two independent clock domains without requiring a fixed phase or frequency relationship between the clocks.
+This project implements a parameterized **Asynchronous FIFO (First-In, First-Out)** using Verilog/SystemVerilog. It is designed to transfer data safely between two independent clock domains with different frequencies and phases.
 
-The design uses Gray-coded read and write pointers, synchronizer circuits for clock-domain crossing (CDC), and full/empty detection logic. A self-checking SystemVerilog testbench, assertions, and functional coverage are used to verify the design.
+The design uses **binary read/write pointers, Gray-code pointer conversion, clock-domain crossing (CDC) synchronizers, and full/empty detection logic**. A self-checking SystemVerilog testbench verifies FIFO functionality using directed tests, randomized transactions, a scoreboard, and SystemVerilog Assertions (SVA).
 
-## Key Features
+## Features
 
-- Parameterized data width and FIFO depth.
-- Independent read and write clock domains.
-- Gray-code pointer synchronization for CDC.
-- Synchronized read and write pointers.
-- Full and empty flag generation.
-- Active-low reset support.
-- Self-checking SystemVerilog testbench.
-- SystemVerilog Assertions (SVA) for design checks.
-- Functional coverage for important FIFO scenarios.
-- Simulation and synthesis compatibility.
+- Parameterized FIFO data width and depth
+- Independent read and write clock domains
+- Binary read and write pointers
+- Gray-code pointer conversion for CDC
+- Two-stage synchronizers for crossing pointer information between clock domains
+- Full and empty flag generation
+- FIFO memory with independent read and write interfaces
+- Self-checking SystemVerilog testbench
+- Driver, monitor, and scoreboard
+- Directed and randomized testing
+- SystemVerilog Assertions for interface protocol checks
 
 ## Architecture
 
 The FIFO consists of the following major components:
 
-1. **FIFO Memory:** Stores data written in the write clock domain and supplies data to the read interface.
-2. **Write Pointer Logic:** Tracks write operations and generates the next write pointer.
-3. **Read Pointer Logic:** Tracks read operations and generates the next read pointer.
-4. **Binary-to-Gray Conversion:** Converts binary pointers into Gray code to reduce simultaneous bit transitions during CDC.
-5. **Pointer Synchronizers:** Synchronize Gray-coded pointers into the opposite clock domain.
-6. **Full Detection:** Prevents writes when the FIFO is full.
-7. **Empty Detection:** Prevents reads when the FIFO is empty.
+| Module | Responsibility |
+|---|---|
+| `async_fifo` | Top-level FIFO integration |
+| `wptr_full` | Write pointer management and full detection |
+| `rptr_empty` | Read pointer management and empty detection |
+| `sync_w2r` | Synchronizes the write Gray pointer into the read clock domain |
+| `sync_r2w` | Synchronizes the read Gray pointer into the write clock domain |
+| `fifomem` | FIFO storage memory |
 
-### Clock-Domain Crossing
+### Block Diagram
 
-The write and read clocks operate independently. Gray-coded pointers are passed through synchronizer flip-flops before being used in the opposite clock domain.
+```text
+                  ASYNCHRONOUS FIFO
+    +------------------------------------------+
+    |                                          |
+    |  WRITE CLOCK DOMAIN   READ CLOCK DOMAIN  |
+    |                                          |
+    |  wr_clk                rd_clk            |
+    |     |                     |              |
+    |     v                     v              |
+    | +------------+       +------------+      |
+    | | Write      |       | Read       |      |
+    | | Pointer    |       | Pointer    |      |
+    | | Binary/Gray|       | Binary/Gray|      |
+    | +------+-----+       +------+-----+      |
+    |        |                    |            |
+    |        v                    v            |
+    |   +----------+         +----------+      |
+    |   | Write-to-|         | Read-to- |      |
+    |   | Read Sync|         | Write Sync|     |
+    |   +-----+----+         +-----+----+      |
+    |         |                    |           |
+    |         v                    v           |
+    |   Empty Detection       Full Detection   |
+    |                                          |
+    |           +----------------+             |
+    |           |  FIFO Memory   |             |
+    |           +----------------+             |
+    |                                          |
+    +------------------------------------------+
+```
 
-This architecture reduces the risk of incorrect pointer sampling during clock-domain crossings. Synchronizer circuits reduce metastability propagation risk but do not eliminate metastability entirely.
+The synchronizers transfer Gray-coded pointer information into the opposite clock domain. The local pointer logic uses this synchronized information to generate the `full` and `empty` status flags.
 
-## Design Parameters
+## Parameters
 
-| Parameter | Default Value | Description |
+The default configuration is:
+
+| Parameter | Default | Description |
 |---|---:|---|
-| `DATA_WIDTH` | 8 | Number of bits per data word |
+| `DATA_WIDTH` | 8 | Number of bits stored in each FIFO entry |
 | `ADDR_WIDTH` | 4 | Number of address bits |
-| FIFO Depth | 16 | Calculated as \(2^{ADDR\_WIDTH}\) |
+| FIFO Depth | 16 entries | Calculated as \(2^{ADDR\_WIDTH}\) |
+| Pointer Width | 5 bits | `ADDR_WIDTH + 1` |
+
+The extra pointer bit tracks wrap-around and helps distinguish a full FIFO from an empty FIFO when the memory addresses are identical.
+
+## Design Details
+
+### 1. Binary Pointers
+
+The read and write pointers identify the current FIFO memory locations. Each pointer contains `ADDR_WIDTH + 1` bits.
+
+- The lower `ADDR_WIDTH` bits select a memory location.
+- The additional most significant bit tracks pointer wrap-around.
+
+The write pointer advances only when a write is accepted, and the read pointer advances only when a read is accepted.
+
+### 2. Gray-Code Conversion
+
+Gray code is used for pointer synchronization because consecutive Gray-code values differ by only one bit.
+
+The conversion is:
+
+```systemverilog
+gray = (binary >> 1) ^ binary;
+```
+
+This reduces the risk of inconsistent multi-bit pointer transitions being observed by the receiving clock domain. Gray coding does not eliminate metastability; the synchronizer stages help reduce its probability of propagating into destination logic.
+
+### 3. Clock-Domain Crossing
+
+The FIFO uses separate synchronizers for the read and write Gray pointers:
+
+- `sync_w2r`: write pointer into the read clock domain
+- `sync_r2w`: read pointer into the write clock domain
+
+Each synchronizer uses two flip-flop stages clocked by the destination clock.
+
+### 4. Full Detection
+
+The write-side logic calculates the next write pointer and compares its Gray-coded value against the synchronized read pointer with the appropriate upper bits inverted.
+
+This detects when advancing the write pointer would fill the FIFO.
+
+### 5. Empty Detection
+
+The read-side logic calculates the next read pointer and compares its Gray-coded value with the synchronized write pointer.
+
+When these values match, the FIFO is empty.
+
+### 6. Memory Operation
+
+The FIFO memory stores data written through `wr_data` and addressed by the write pointer. The read address is generated from the read pointer.
+
+Writes are accepted when `wr_en` is asserted and `full` is deasserted. Reads are accepted when `rd_en` is asserted and `empty` is deasserted.
 
 ## Interface
 
-### Write Interface
+| Signal | Direction | Description |
+|---|---|---|
+| `wr_clk` | Input | Write clock |
+| `wr_rst_n` | Input | Active-low write-domain reset |
+| `wr_en` | Input | Write enable |
+| `wr_data` | Input | Input data |
+| `full` | Output | Indicates FIFO is full |
+| `rd_clk` | Input | Read clock |
+| `rd_rst_n` | Input | Active-low read-domain reset |
+| `rd_en` | Input | Read enable |
+| `rd_data` | Output | Output data |
+| `empty` | Output | Indicates FIFO is empty |
 
-| Signal | Description |
-|---|---|
-| `wr_clk` | Write-domain clock |
-| `wr_rst_n` | Active-low write-domain reset |
-| `wr_en` | Write enable |
-| `wr_data` | Input data |
-| `full` | Indicates that the FIFO is full |
-
-### Read Interface
-
-| Signal | Description |
-|---|---|
-| `rd_clk` | Read-domain clock |
-| `rd_rst_n` | Active-low read-domain reset |
-| `rd_en` | Read enable |
-| `rd_data` | Output data |
-| `empty` | Indicates that the FIFO is empty |
-
-## Verification Strategy
+## Verification Methodology
 
 The design is verified using a self-checking SystemVerilog testbench.
 
-The verification strategy includes:
+### Testbench Components
 
-- Reset and initial empty-state checks.
-- Normal write and read operations.
-- FIFO full-condition testing.
-- FIFO empty-condition testing.
-- Data-integrity checks.
-- Back-to-back transactions.
-- Independent read and write clocks.
-- Assertion-based checks for important design properties.
-- Functional coverage of key operating scenarios.
+**Driver**
 
-The testbench compares expected and observed data to identify functional mismatches.
+Generates write and read transactions. It checks the FIFO status before attempting an operation and drives inputs with respect to the relevant clock domain.
 
-## Tools Used
+**Monitor**
 
-- **HDL:** Verilog/SystemVerilog
-- **Simulation:** Icarus Verilog 12.0
-- **Waveform Analysis:** GTKWave
-- **Synthesis and Design Validation:** AMD/Xilinx Vivado
-- **Verification:** Self-checking testbench, SVA, functional coverage
+Observes accepted writes and reads at their respective clock edges.
 
-## Running the Simulation
+**Scoreboard**
 
-The following commands are examples. Adjust the source filenames and module names to match the actual repository structure.
+Uses a SystemVerilog queue as a reference model:
 
-### Compile
+- `push_back()` stores expected data after an accepted write.
+- `pop_front()` retrieves the oldest expected data after an accepted read.
+- Expected and actual output data are compared to detect data mismatches and ordering errors.
+
+**Assertions**
+
+SystemVerilog Assertions are used to check interface protocol rules, including:
+
+- No write request while the FIFO is full.
+- No read request while the FIFO is empty.
+
+Pointer-related assertions require careful temporal sampling and validation before being included in the final regression.
+
+## Test Scenarios
+
+The testbench has exercised the following scenarios:
+
+| Test | Purpose |
+|---|---|
+| Empty FIFO | Check behavior when a read is attempted while empty |
+| Full FIFO | Fill the FIFO to its configured depth and exercise full detection |
+| Read after full | Read stored data and verify FIFO ordering |
+| Normal read/write | Verify basic FIFO functionality |
+| Simultaneous read/write | Exercise concurrent operations in both clock domains |
+| Pointer wrap-around | Exercise circular memory addressing |
+| Random stress test | Generate randomized read/write operations and data |
+
+The randomized test used 100 transaction iterations. The scoreboard output showed matching expected and actual data for the reported reads in the recorded simulation run.
+
+## Simulation and Tools
+
+The project has been simulated using:
+
+- **Language:** Verilog/SystemVerilog
+- **Simulation:** Icarus Verilog
+- **RTL development and checking:** Xilinx Vivado
+- **Verification techniques:** Self-checking testbench, scoreboard, directed tests, randomized testing, and SVA
+
+The testbench uses independent clocks to exercise asynchronous operation.
+
+### Running the Simulation
+
+Add the FIFO RTL source files and `tb_async_fifo.sv` to your simulator project.
+
+For an Icarus Verilog setup, compile the required source files together. For example, adapt the filenames to match your repository:
 
 ```bash
-iverilog -g2012 -o fifo_sim \
-  async_fifo.sv tb_async_fifo.sv
+iverilog -g2012 -s tb_async_fifo -o fifo_sim \
+    async_fifo.sv \
+    wptr_full.sv \
+    rptr_empty.sv \
+    sync_w2r.sv \
+    sync_r2w.sv \
+    fifomem.sv \
+    tb_async_fifo.sv
 ```
 
-### Run
+Run the simulation:
 
 ```bash
 vvp fifo_sim
 ```
 
-### View Waveforms
+The testbench prints write activity and scoreboard comparisons. A successful data comparison prints `PASS`; a mismatch prints `FAIL`.
 
-```bash
-gtkwave dump.vcd
-```
+**Note:** The command assumes the listed files exist under those names and that the simulator supports the SystemVerilog constructs used by the testbench. Adjust the source list and paths to match the actual project.
 
-Ensure that waveform dumping is enabled in the testbench before opening `dump.vcd`.
+## Functional Coverage
 
-**Note:** Icarus Verilog has limitations in support for some SystemVerilog Assertions and functional coverage constructs. If these features are not supported by your simulator, use a compatible simulator or run the relevant checks separately.
+Functional coverage is the next planned verification enhancement. The intended coverage goals are:
 
-## Key Learning Outcomes
+- FIFO full and empty states
+- Accepted write and read operations
+- Simultaneous read/write activity
+- Pointer wrap-around
+- Relevant combinations of interface controls and FIFO status
 
-- Designing parameterized RTL modules.
-- Understanding asynchronous FIFO architecture.
-- Implementing binary and Gray-code pointer logic.
-- Handling clock-domain crossing in digital systems.
-- Designing FIFO full and empty detection logic.
-- Developing self-checking verification environments.
-- Using assertions and functional coverage.
-- Debugging RTL simulations and analyzing waveforms.
-
-## Applications
-
-Asynchronous FIFOs are commonly used in:
-
-- System-on-Chip (SoC) interconnects.
-- Processor and peripheral interfaces.
-- Digital communication systems.
-- Multi-clock FPGA designs.
-- Data buffering between independent hardware blocks.
+Coverage results should be reported only after the covergroups are implemented, sampled, and measured in simulation.
 
 ## Future Improvements
 
-- Formal verification of FIFO safety properties.
-- Randomized stress testing across different clock ratios.
-- Additional CDC analysis and synchronizer review.
-- Synthesis and timing reports for FPGA or ASIC implementation.
-- Improved functional coverage and regression automation.
+- Implement and validate functional coverage using covergroups, coverpoints, bins, and cross coverage.
+- Add carefully validated pointer increment and pointer stability assertions.
+- Add Gray-code transition assertions.
+- Verify full and empty flag behavior with dedicated properties.
+- Improve regression reporting and test summaries.
+- Organize the testbench into reusable verification components.
+- Expand randomized testing and add reproducible random seeds.
+- Add waveform screenshots and documented simulation results.
 
----
+## Learning Outcomes
 
-**Project Focus:** RTL Design | SystemVerilog | CDC | Digital Design Verification | SVA
+This project demonstrates practical experience with:
+
+- Asynchronous FIFO architecture
+- Binary and Gray-code pointer logic
+- Clock-domain crossing fundamentals
+- FIFO full/empty detection
+- SystemVerilog testbench development
+- Queue-based scoreboard implementation
+- Directed and randomized verification
+- SystemVerilog Assertions
+- RTL simulation and debugging
+
+## Conclusion
+
+This project combines RTL design and functional verification of a parameterized asynchronous FIFO. It provides hands-on experience with clock-domain crossing, pointer management, FIFO status logic, self-checking verification, and assertion-based protocol checking.
+
+The project is intended as a learning and portfolio project for RTL Design and Design Verification roles.
